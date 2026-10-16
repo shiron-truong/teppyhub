@@ -1,0 +1,40 @@
+menu "Waze HUD"
+
+    config HUD_DEMO_MODE
+        bool "Feed the UI with simulated data (no phone needed)"
+        default n
+        help
+            Starts a generator that cycles through Idle, Waze Active, overspeed, Police/Jam
+            cards and lane guidance. Handy for reviewing the screens on the bench.
+
+    config HUD_OVERSPEED_MARGIN_KMH
+        int "Overspeed threshold above the limit (km/h)"
+        default 0
+        range 0 30
+        help
+            Red speed + banner + sound when speed > limit + this margin.
+
+    config HUD_AUDIO_ENABLE
+        bool "Overspeed sound through MAX98357A (I2S)"
+        default y
+
+    config HUD_I2S_BCLK_GPIO
+        int "I2S BCLK GPIO"
+        depends on HUD_AUDIO_ENABLE
+        default 11
+        help
+            Default GPIO11/12/13 are the microSD (TF) SPI pins of the Waveshare board
+            ("PA A" in the design PDF). If you use the microSD slot, pick other free pins.
+            Never use the RGB LCD pins, GPIO8/9 (I2C), GPIO4 (touch IRQ) or GPIO19/20 (USB).
+
+    config HUD_I2S_LRC_GPIO
+        int "I2S LRC / WS GPIO"
+        depends on HUD_AUDIO_ENABLE
+        default 12
+
+    config HUD_I2S_DIN_GPIO
+        int "I2S DIN GPIO"
+        depends on HUD_AUDIO_ENABLE
+        default 13
+
+endmenu

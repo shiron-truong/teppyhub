@@ -1,0 +1,6 @@
+/build/
+/managed_components/
+/sdkconfig
+/sdkconfig.old
+/eim_config.toml
+/.vscode/settings.json

@@ -1,0 +1,4 @@
+dependencies:
+  idf: ">=5.3"
+  lvgl/lvgl: ">=8.3.11,<9"
+  bobscott45/waveshare_esp32_s3_touch_lcd_4_3: "^1.0.7"
