@@ -1,5 +1,6 @@
 #include "hlp_protocol.h"
 #include "hud_state.h"
+#include "connection_diag.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "cJSON.h"
@@ -14,6 +15,13 @@ static char frame[HLP_MAX_FRAME];
 static size_t used;
 static uint32_t last_status_log_ms;
 static bool logged_status_fields;
+static volatile bool session_reset_requested;
+static uint32_t last_status_ms;
+static uint32_t last_bad_json_log_ms;
+static uint32_t last_unknown_log_ms;
+static uint32_t bad_json_count;
+static bool logged_bad_json;
+static bool logged_unknown;
 
 static cJSON *field(cJSON *root, const char *a, const char *b, const char *c) {
     cJSON *v = cJSON_GetObjectItemCaseSensitive(root, a);
@@ -108,7 +116,19 @@ static void parse_alert_list(cJSON *root, hud_state_t *s) {
 
 static void handle_frame(const char *line, size_t length) {
     cJSON *root = cJSON_ParseWithLength(line, length);
-    if (!root) { ESP_LOGW(TAG, "Ignoring malformed HLP JSON frame"); return; }
+    if (!root) {
+        ++bad_json_count;
+        const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+        if (!logged_bad_json || now - last_bad_json_log_ms >= 5000) {
+            last_bad_json_log_ms = now;
+            logged_bad_json = true;
+            ESP_LOGW(TAG, "Ignoring malformed HLP JSON frame (length=%u, count=%u)",
+                     (unsigned)length, (unsigned)bad_json_count);
+            connection_diag_event(CONN_DIAG_BAD_JSON, (int32_t)length,
+                                  (int32_t)bad_json_count);
+        }
+        return;
+    }
     cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "t");
     if (cJSON_IsString(type) && strcmp(type->valuestring, "ping") == 0) {
         hlp_protocol_send_line("{\"v\":1,\"t\":\"pong\"}");
@@ -116,6 +136,7 @@ static void handle_frame(const char *line, size_t length) {
         return;
     }
     if (cJSON_IsString(type) && strcmp(type->valuestring, "s") == 0) {
+        last_status_ms = (uint32_t)(esp_timer_get_time() / 1000);
         hud_state_t s = { .distance_m = -1, .remaining_m = -1, .remaining_min = -1, .progress_percent = -1, .avg_zone_remaining_m = -1, .avg_zone_progress = -1, .alert_subtype = -1, .alert_delay_min = -1, .lane_recommended = -1, .updated_ms = (uint32_t)(esp_timer_get_time() / 1000) };
         if (!logged_status_fields) {
             char names[256] = {0};
@@ -135,6 +156,7 @@ static void handle_frame(const char *line, size_t length) {
         s.waze_over = integer(root, "over", NULL, NULL, 0) != 0;
         s.has_over = has_value(root, "over", NULL, NULL);
         s.has_speed = has_value(root, "spd", "speed", "speedKmh") && s.speed_kmh >= 0;
+        connection_diag_note_status(s.speed_kmh, s.has_speed);
         s.has_limit = has_value(root, "lim", "limit", "speedLimit") && s.limit_kmh > 0;
         s.distance_m = integer(root, "dst", "dist", "distanceM", -1);
         s.remaining_m = remaining_distance(root);
@@ -208,11 +230,49 @@ static void handle_frame(const char *line, size_t length) {
                 s.alert_count ? s.alert_codes[0] : 0,
                 s.alert_count ? s.alert_distances[0] : -1);
         }
+    } else if (cJSON_IsString(type)) {
+        const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+        if (!logged_unknown || now - last_unknown_log_ms >= 5000) {
+            last_unknown_log_ms = now;
+            logged_unknown = true;
+            ESP_LOGW(TAG, "Ignoring unsupported HLP frame type: %s", type->valuestring);
+            connection_diag_event(CONN_DIAG_UNKNOWN_FRAME, 0, 0);
+        }
+    } else {
+        const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+        if (!logged_unknown || now - last_unknown_log_ms >= 5000) {
+            last_unknown_log_ms = now;
+            logged_unknown = true;
+            ESP_LOGW(TAG, "Ignoring HLP JSON frame without a string type");
+            connection_diag_event(CONN_DIAG_UNKNOWN_FRAME, 1, 0);
+        }
     }
     cJSON_Delete(root);
 }
 
-void hlp_protocol_init(void) { used = 0; }
+void hlp_protocol_init(void)
+{
+    used = 0;
+    last_status_ms = 0;
+    session_reset_requested = false;
+}
+
+void hlp_protocol_reset_session(void) { session_reset_requested = true; }
+
+bool hlp_protocol_take_session_reset(void)
+{
+    if (!session_reset_requested) return false;
+    session_reset_requested = false;
+    used = 0;
+    last_status_ms = 0;
+    return true;
+}
+
+uint32_t hlp_protocol_status_age_ms(uint32_t now_ms)
+{
+    return last_status_ms ? now_ms - last_status_ms : UINT32_MAX;
+}
+
 void hlp_protocol_feed(const uint8_t *data, size_t length) {
     for (size_t i = 0; i < length; ++i) {
         uint8_t ch = data[i];
@@ -221,6 +281,11 @@ void hlp_protocol_feed(const uint8_t *data, size_t length) {
             if (used) handle_frame(frame, used);
             used = 0;
         } else if (used < sizeof(frame) - 1) frame[used++] = (char)ch;
-        else { used = 0; ESP_LOGW(TAG, "HLP frame exceeded %u bytes; discarded", HLP_MAX_FRAME); }
+        else {
+            const int32_t frame_length = (int32_t)(used + 1);
+            used = 0;
+            ESP_LOGW(TAG, "HLP frame exceeded %u bytes; discarded", HLP_MAX_FRAME);
+            connection_diag_event(CONN_DIAG_FRAME_OVERFLOW, frame_length, 0);
+        }
     }
 }

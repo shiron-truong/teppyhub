@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "main.c" "hud_state.c" "audio.c" "demo.c"
+    SRCS "main.c" "hud_state.c" "audio.c" "demo.c" "connection_diag.c"
          "hlp_protocol.c" "hlp_ble.c"
          "hud_ui.c" "ui_common.c" "ui_hud.c" "ui_hud_mirror.c" "ui_stats.c" "ui_settings.c"
          "alert_icons.c" "turn_icons.c"

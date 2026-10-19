@@ -1,5 +1,6 @@
 #include "bsp/board.h"
 #include "bsp/lvgl_port.h"
+#include "connection_diag.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "hlp_ble.h"
@@ -21,6 +22,7 @@ void app_main(void)
         e = nvs_flash_init();
     }
     ESP_ERROR_CHECK(e);
+    connection_diag_init();
 
     hud_state_init();
 
