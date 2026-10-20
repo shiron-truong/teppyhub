@@ -19,6 +19,9 @@ static const char *TAG = "hud_state";
 static SemaphoreHandle_t mtx;
 static hud_state_t cur;
 static hud_settings_t cfg;
+static bool ble_rssi_valid;
+static int16_t ble_rssi_smoothed;
+static uint32_t ble_rssi_updated_ms;
 
 typedef struct { hud_alert_t a; uint32_t seen_ms; } alert_slot_t;
 static alert_slot_t slots[HUD_MAX_ALERTS];
@@ -170,7 +173,24 @@ void hud_state_set_ble_connected(bool connected)
 {
     xSemaphoreTake(mtx, portMAX_DELAY);
     cur.ble_connected = connected;
-    if (!connected) memset(slots, 0, sizeof(slots));
+    ble_rssi_valid = false;
+    ble_rssi_updated_ms = 0;
+    if (!connected) {
+        memset(slots, 0, sizeof(slots));
+    }
+    xSemaphoreGive(mtx);
+}
+
+void hud_state_set_ble_rssi(int8_t rssi)
+{
+    xSemaphoreTake(mtx, portMAX_DELAY);
+    if (!ble_rssi_valid) {
+        ble_rssi_smoothed = rssi;
+        ble_rssi_valid = true;
+    } else {
+        ble_rssi_smoothed = (ble_rssi_smoothed * 3 + rssi) / 4;
+    }
+    ble_rssi_updated_ms = now_ms();
     xSemaphoreGive(mtx);
 }
 
@@ -208,13 +228,24 @@ static bool clock_is_night(const char *txt, bool *known)
 
 void hud_state_get(hud_snapshot_t *out)
 {
+    const uint32_t now = now_ms();
     xSemaphoreTake(mtx, portMAX_DELAY);
     out->s = cur;
     out->cfg = cfg;
+    out->has_ble_rssi = cur.ble_connected && ble_rssi_valid &&
+                        now - ble_rssi_updated_ms <= 5000;
+    if (out->has_ble_rssi) {
+        int rssi = ble_rssi_smoothed;
+        if (rssi < -90) rssi = -90;
+        if (rssi > -30) rssi = -30;
+        out->ble_signal_pct = ((rssi + 90) * 100 + 30) / 60;
+    } else {
+        out->ble_signal_pct = 0;
+    }
     xSemaphoreGive(mtx);
 
     const hud_state_t *s = &out->s;
-    out->fresh = s->ble_connected && s->updated_ms && (now_ms() - s->updated_ms < FRESH_MS);
+    out->fresh = s->ble_connected && s->updated_ms && (now - s->updated_ms < FRESH_MS);
     out->nav_mode = out->fresh && s->navigation;
     const int margin = CONFIG_HUD_OVERSPEED_MARGIN_KMH;
     out->over_limit = out->fresh && (s->has_over ? s->waze_over :

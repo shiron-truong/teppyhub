@@ -13,6 +13,7 @@
 #define HUD_MAX_ALERTS 3
 #define HUD_MAX_LANES  6
 #define HUD_HIST_N     13          /* 13 points x 150 s = last 30 minutes */
+#define HUD_DEBUG_FIELDS_LEN 384
 
 typedef struct {
     bool ble_connected;
@@ -94,12 +95,15 @@ typedef struct {
     bool auto_dim;
     uint8_t theme;                   /* 0 dark, 1 sport */
     uint8_t lang;                    /* 0 vi, 1 en */
+    bool debug_mode;
 } hud_settings_t;
 
 /* ---- what the UI / audio consume ---- */
 typedef struct {
     hud_state_t s;
     bool fresh;                      /* BLE up and data < 4 s old */
+    bool has_ble_rssi;
+    int ble_signal_pct;              /* RSSI mapped to a clamped 0-100 reference scale */
     bool nav_mode;                   /* fresh && navigation -> Waze Active layout, else Idle layout */
     bool over_limit;
     int over_by_kmh;
@@ -110,6 +114,7 @@ typedef struct {
 
 void hud_state_init(void);
 void hud_state_set_ble_connected(bool connected);
+void hud_state_set_ble_rssi(int8_t rssi);
 void hud_state_update(const hud_state_t *state);
 void hud_state_get(hud_snapshot_t *out);
 int  hud_alerts_get(hud_alert_t out[HUD_MAX_ALERTS]);    /* sorted by priority, returns count */

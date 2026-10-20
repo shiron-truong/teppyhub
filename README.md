@@ -36,6 +36,8 @@ No phone? `idf.py menuconfig` -> *Waze HUD* -> enable **Feed the UI with simulat
 ## Fixes vs. the previous version
 - LVGL heap was 32 KB static -> now malloc (PSRAM). Tiny-TTF glyph cache was 8 KB (smaller than one 112 px glyph) -> sized per font.
 - LVGL draw buffers use PSRAM to preserve internal RAM for the NimBLE host task; NimBLE task creation and BLE advertising failures are logged.
+- NimBLE dynamic allocations and the large BLE RX/diagnostic queues are placed in PSRAM to preserve scarce internal RAM for controller, ATT, and interrupt-time work.
+- The Bluetooth status icon samples connection RSSI once per second, smooths readings to reduce flicker, and uses green (>=67%), yellow (33–66%), or red (<33%) against a reference scale mapping -90 to -30 dBm to 0–100%; unavailable/stale readings are dimmed.
 - `CONFIG_FREERTOS_HZ=100` made `pdMS_TO_TICKS(5)` = 0; now 1000. Main stack 3.5 KB -> 8 KB; protocol task 4 -> 6 KB.
 - BLE thread no longer takes the LVGL mutex (`lvgl_port_lock(0)` is a non-blocking try, updates could be dropped).
 - Backlight turned on only after the first UI frame; NVS initialised once in `app_main`.

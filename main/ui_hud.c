@@ -45,6 +45,14 @@ static const int preview_turn_codes[] = {
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20
 };
 
+static uint32_t ble_icon_color(const hud_snapshot_t *sn)
+{
+    if (!sn->s.ble_connected || !sn->has_ble_rssi) return ui_pal->dim;
+    if (sn->ble_signal_pct >= 67) return ui_pal->ok;
+    if (sn->ble_signal_pct >= 33) return ui_pal->warn;
+    return ui_pal->danger;
+}
+
 typedef struct {
     char sub[48];
     uint32_t color;
@@ -404,7 +412,7 @@ void ui_hud_update(const hud_snapshot_t *sn)
     const char *st = !s->ble_connected ? ui_tr(S_PREVIEW) : !sn->fresh ? ui_tr(S_BLE_WAIT) : ui_tr(S_LIVE);
     ui_set_text(h.status, st);
     lv_obj_set_style_text_color(h.status, lv_color_hex(!s->ble_connected ? P->dim : !sn->fresh ? P->warn : P->ok), 0);
-    lv_obj_set_style_text_color(h.bt, lv_color_hex(s->ble_connected ? P->accent : P->dim), 0);
+    lv_obj_set_style_text_color(h.bt, lv_color_hex(ble_icon_color(sn)), 0);
     lv_obj_set_style_text_color(h.gps, lv_color_hex(sn->fresh && s->has_speed ? P->accent : P->dim), 0);
     if (sn->night) lv_obj_clear_flag(h.moon, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(h.moon, LV_OBJ_FLAG_HIDDEN);
 

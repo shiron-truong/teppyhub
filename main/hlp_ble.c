@@ -15,6 +15,7 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include <string.h>
@@ -306,6 +307,8 @@ static void protocol_task(void *arg) {
     bool observed_subscribed = false;
     bool data_was_stale = false;
     bool no_notify_logged = false;
+    uint32_t last_rssi_sample_ms = 0;
+    int8_t latest_rssi = -127;
     for (;;) {
         if (hlp_protocol_take_session_reset()) {
             observed_subscribed = false;
@@ -322,6 +325,17 @@ static void protocol_task(void *arg) {
         }
 
         const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+        if (conn != BLE_HS_CONN_HANDLE_NONE && now - last_rssi_sample_ms >= 1000) {
+            last_rssi_sample_ms = now;
+            int8_t rssi;
+            if (ble_gap_conn_rssi(conn, &rssi) == 0) {
+                latest_rssi = rssi;
+                hud_state_set_ble_rssi(rssi);
+            }
+        } else if (conn == BLE_HS_CONN_HANDLE_NONE) {
+            last_rssi_sample_ms = 0;
+            latest_rssi = -127;
+        }
         if (subscribed && !observed_subscribed) {
             observed_subscribed = true;
             subscribed_since_ms = now;
@@ -354,15 +368,12 @@ static void protocol_task(void *arg) {
             conn != BLE_HS_CONN_HANDLE_NONE ? 10000 : 60000;
         if (now - last_health_ms >= health_interval_ms) {
             last_health_ms = now;
-            int8_t rssi = -127;
-            if (conn != BLE_HS_CONN_HANDLE_NONE)
-                ble_gap_conn_rssi(conn, &rssi);
             const uint16_t host_stack_hwm = host_task_handle
                 ? (uint16_t)uxTaskGetStackHighWaterMark(host_task_handle) : 0;
             const uint16_t protocol_stack_hwm =
                 (uint16_t)uxTaskGetStackHighWaterMark(NULL);
             connection_diag_health((uint8_t)uxQueueMessagesWaiting(queue),
-                                   status_age_ms, rssi, host_stack_hwm,
+                                   status_age_ms, latest_rssi, host_stack_hwm,
                                    protocol_stack_hwm);
         }
         if (host_synced && conn == BLE_HS_CONN_HANDLE_NONE &&
@@ -378,7 +389,12 @@ void hlp_ble_start(void) {
     /* NVS is initialised once in app_main(). */
     ESP_LOGI(TAG, "Starting BLE peripheral");
     connection_diag_event(CONN_DIAG_BLE_START, 0, 0);
-    queue = xQueueCreate(16, sizeof(chunk_t)); configASSERT(queue);
+    queue = xQueueCreateWithCaps(16, sizeof(chunk_t),
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!queue) {
+        ESP_LOGE(TAG, "Could not allocate BLE RX queue in PSRAM");
+        return;
+    }
     ESP_ERROR_CHECK(nimble_port_init());
     ESP_LOGI(TAG, "NimBLE initialized");
     ble_svc_gap_init();
@@ -393,7 +409,6 @@ void hlp_ble_start(void) {
     ble_hs_cfg.sync_cb=synced;
     if (xTaskCreate(protocol_task,"hlp_protocol",6144,NULL,5,NULL)!=pdPASS) { ESP_LOGE(TAG,"Protocol task creation failed"); return; }
     ESP_LOGI(TAG, "Starting NimBLE host task");
-    TaskHandle_t host_task_handle = NULL;
     BaseType_t task_rc = xTaskCreatePinnedToCore(host_task, "nimble_host", NIMBLE_HS_STACK_SIZE,
                                                  NULL, configMAX_PRIORITIES - 4,
                                                  &host_task_handle, NIMBLE_CORE);

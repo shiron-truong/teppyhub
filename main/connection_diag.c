@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/portmacro.h"
 #include "freertos/queue.h"
 #include "nvs.h"
@@ -91,7 +92,7 @@ typedef struct {
     uint32_t largest_psram;
 } pending_event_t;
 
-static store_t store;
+static store_t *store;
 static QueueHandle_t event_queue;
 static nvs_handle_t diag_nvs_handle;
 static bool persistent;
@@ -181,8 +182,8 @@ static void print_record(const record_t *r)
 
 static void persist_store(void)
 {
-    if (!persistent) return;
-    esp_err_t err = nvs_set_blob(diag_nvs_handle, NVS_KEY, &store, sizeof(store));
+    if (!persistent || !store) return;
+    esp_err_t err = nvs_set_blob(diag_nvs_handle, NVS_KEY, store, sizeof(*store));
     if (err == ESP_OK) err = nvs_commit(diag_nvs_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Could not persist diagnostics: %s; continuing with RAM log only",
@@ -195,20 +196,25 @@ static void persist_store(void)
 
 void connection_diag_init(void)
 {
-    memset(&store, 0, sizeof(store));
-    store.magic = DIAG_MAGIC;
+    store = heap_caps_calloc(1, sizeof(*store), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!store) {
+        ESP_LOGE(TAG, "Could not allocate diagnostic ring in PSRAM; persistent diagnostics disabled");
+        persistent = false;
+        return;
+    }
+    store->magic = DIAG_MAGIC;
 
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &diag_nvs_handle);
     if (err == ESP_OK) {
         size_t size = 0;
         err = nvs_get_blob(diag_nvs_handle, NVS_KEY, NULL, &size);
-        if (err == ESP_OK && size == sizeof(store)) {
-            err = nvs_get_blob(diag_nvs_handle, NVS_KEY, &store, &size);
-            if (err != ESP_OK || store.magic != DIAG_MAGIC ||
-                store.count > DIAG_RECORDS || store.next >= DIAG_RECORDS) {
+        if (err == ESP_OK && size == sizeof(*store)) {
+            err = nvs_get_blob(diag_nvs_handle, NVS_KEY, store, &size);
+            if (err != ESP_OK || store->magic != DIAG_MAGIC ||
+                store->count > DIAG_RECORDS || store->next >= DIAG_RECORDS) {
                 ESP_LOGE(TAG, "Saved diagnostic log is invalid; starting a new log");
-                memset(&store, 0, sizeof(store));
-                store.magic = DIAG_MAGIC;
+                memset(store, 0, sizeof(*store));
+                store->magic = DIAG_MAGIC;
             }
         } else if (err == ESP_OK) {
             ESP_LOGW(TAG, "Saved diagnostic log uses an older format; starting a new log");
@@ -221,14 +227,15 @@ void connection_diag_init(void)
     }
 
     ESP_LOGI(TAG, "Previous BLE diagnostic log: %u records; oldest to newest",
-             (unsigned)store.count);
-    const uint16_t oldest = (uint16_t)((store.next + DIAG_RECORDS - store.count) % DIAG_RECORDS);
-    for (uint16_t i = 0; i < store.count; ++i)
-        print_record(&store.records[(oldest + i) % DIAG_RECORDS]);
+             (unsigned)store->count);
+    const uint16_t oldest = (uint16_t)((store->next + DIAG_RECORDS - store->count) % DIAG_RECORDS);
+    for (uint16_t i = 0; i < store->count; ++i)
+        print_record(&store->records[(oldest + i) % DIAG_RECORDS]);
 
-    ++store.boot_id;
+    ++store->boot_id;
     disconnected_since_ms = now_ms();
-    event_queue = xQueueCreate(32, sizeof(pending_event_t));
+    event_queue = xQueueCreateWithCaps(32, sizeof(pending_event_t),
+                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!event_queue) {
         ESP_LOGE(TAG, "Could not allocate diagnostic event queue; persistent logging disabled");
         persistent = false;
@@ -302,7 +309,9 @@ void connection_diag_note_status(int speed_kmh, bool has_speed)
 
 static void enqueue_event(const pending_event_t *event)
 {
-    if (!event_queue || xQueueSend(event_queue, event, 0) != pdTRUE) {
+    if (!store) return;
+    if (!event_queue) return;
+    if (xQueueSend(event_queue, event, 0) != pdTRUE) {
         ESP_LOGE(TAG, "Diagnostic event queue full; event %s was not saved",
                  event_name(event->event));
     }
@@ -368,6 +377,7 @@ void connection_diag_event(connection_diag_event_t event, int32_t arg0, int32_t 
 
 void connection_diag_link_end(int reason, int8_t rssi, uint8_t queue_depth)
 {
+    if (!store || !event_queue) return;
     pending_event_t item = snapshot_event(CONN_DIAG_DISCONNECT, reason, 0,
                                           queue_depth, UINT32_MAX, rssi, 0, 0);
     if (!event_queue || xQueueSendToFront(event_queue, &item, 0) != pdTRUE) {
@@ -389,7 +399,7 @@ void connection_diag_process(void)
     pending_event_t item;
     if (event_queue && xQueueReceive(event_queue, &item, 0) == pdTRUE) {
         record_t record = {
-            .boot_id = store.boot_id,
+            .boot_id = store->boot_id,
             .uptime_ms = item.uptime_ms,
             .uptime_s = item.uptime_ms / 1000,
             .status_age_s = item.status_age_ms == UINT32_MAX
@@ -420,12 +430,11 @@ void connection_diag_process(void)
         record.rx_bytes = item.rx_bytes;
         record.rx_rejected = item.rx_rejected;
         record.rx_max_bytes = item.rx_max_bytes;
-        record.rx_max_bytes = item.rx_max_bytes;
         record.status_frames = item.status_frames;
 
-        store.records[store.next] = record;
-        store.next = (uint16_t)((store.next + 1) % DIAG_RECORDS);
-        if (store.count < DIAG_RECORDS) ++store.count;
+        store->records[store->next] = record;
+        store->next = (uint16_t)((store->next + 1) % DIAG_RECORDS);
+        if (store->count < DIAG_RECORDS) ++store->count;
         dirty = true;
         print_record(&record);
     }
